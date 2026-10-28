@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Total / BTC spot volume</title>
+<style>
+:root{--bg:#fff;--fg:#1a1d21;--mut:#6b7280;--line:#e5e7eb;--btc:#111}
+@media(prefers-color-scheme:dark){:root{--bg:#14161a;--fg:#e8e9eb;--mut:#8b919b;--line:#2a2e35;--btc:#f2f2f2}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:28px 20px}
+h1{font-size:26px;font-weight:600;margin:0 0 4px;letter-spacing:-.01em}
+p.sub{color:var(--mut);margin:0 0 20px;max-width:70ch}
+.ctl{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:end;margin-bottom:12px}
+label{display:flex;flex-direction:column;font-size:13px;color:var(--mut);gap:4px}
+input,select,button{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+input[type=password]{width:210px}input[type=number]{width:80px}
+button{background:var(--fg);color:var(--bg);border-color:var(--fg);cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:2px solid #3b82f6;outline-offset:2px}
+.chk{flex-direction:row;align-items:center;gap:6px;padding-bottom:8px}
+.chk input{padding:0}
+#status{font-size:13px;color:var(--mut);min-height:20px;margin-bottom:8px}
+.legend{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut);margin:0 0 6px auto;width:max-content}
+.legend i{display:block;width:180px;height:8px;border-radius:4px;background:linear-gradient(90deg,hsl(120 65% 45%),hsl(60 65% 45%),hsl(0 65% 45%))}
+canvas{width:100%;height:560px;display:block}
+#read{font-size:13px;color:var(--mut);min-height:20px}
+</style>
+</head>
+<body>
+<main>
+<h1>Total / BTC spot volume</h1>
+<p class="sub">Sums daily volume of the top coins from CoinGecko, divides by BTC volume, smooths over 7 days, and colors the BTC price by the result.</p>
+<div class="ctl">
+  <label>API key<input id="key" type="password" placeholder="CoinGecko key" autocomplete="off"></label>
+  <label>Plan<select id="plan"><option value="demo">Demo (free, 365 days max)</option><option value="pro">Pro / Analyst</option></select></label>
+  <label>Coins<select id="n"><option value="30">30</option><option value="100">100</option><option value="200">200</option><option value="500">500</option></select></label>
+  <label>Range<select id="days"><option value="365">1 year</option><option value="730">2 years</option><option value="1460">4 years</option></select></label>
+  <label class="chk"><input id="stab" type="checkbox" checked>Exclude stablecoins and wrapped assets</label>
+  <label class="chk"><input id="rem" type="checkbox">Save key on this device</label>
+  <button id="go">Load data</button>
+</div>
+<div id="status">Enter your key and select Load data. Demo keys only allow 365 days.</div>
+<div class="legend"><span>Bitcoin-led</span><i></i><span>alt froth</span></div>
+<canvas id="c"></canvas>
+<div id="read"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id), sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const STABLES=new Set(['tether','usd-coin','dai','usds','first-digital-usd','ethena-usde','usd1-wlfi','paypal-usd','binance-usd','true-usd','usdd','global-dollar','ripple-usd','usdt0','staked-ether','wrapped-steth','wrapped-bitcoin','weth','wrapped-eeth','coinbase-wrapped-btc','wrapped-beacon-eth','usdtb','susds','ethena-staked-usde','binance-staked-sol']);
+const setStatus=t=>$('status').textContent=t;
+let S=null;const CACHE={};
+
+async function api(path){
+  const pro=$('plan').value==='pro';
+  const base=pro?'https://pro-api.coingecko.com/api/v3':'https://api.coingecko.com/api/v3';
+  const k=$('key').value.trim();
+  const url=base+path+(k?`&${pro?'x_cg_pro_api_key':'x_cg_demo_api_key'}=${encodeURIComponent(k)}`:'');
+  for(let i=0;i<6;i++){
+    let r;
+    try{r=await fetch(url)}
+    catch(e){setStatus(`Network error on ${path.split('?')[0]}, retrying in ${10*(i+1)}s (attempt ${i+1}/6)…`);await sleep(10000*(i+1));continue}
+    if(r.status===429){setStatus('Rate limited, waiting…');await sleep(15000*(i+1));continue}
+    if(!r.ok) throw new Error(r.status+' '+(await r.text()).slice(0,140));
+    return r.json();
+  }
+  throw new Error('Request kept failing for '+path.split('?')[0]+'. Check for an ad blocker or privacy extension blocking api.coingecko.com, or try another browser. Select Load data to resume.');
+}
+
+async function run(){
+  const n=+$('n').value, days=$('days').value;
+  $('go').disabled=true;
+  try{
+    setStatus('Loading top coins…');
+    let mk=[];
+    for(let pg=1;mk.length<n+30&&pg<=4;pg++){mk=mk.concat(await api(`/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=${pg}`));await sleep(700)}
+    let ids=mk.map(c=>c.id).filter(id=>id!=='bitcoin'&&!($('stab').checked&&STABLES.has(id))).slice(0,n-1);
+    ids.unshift('bitcoin');
+    const tot=new Map(), btc=new Map(), price=new Map();
+    for(let i=0;i<ids.length;i++){
+      setStatus(`Fetching ${ids[i]} (${i+1}/${ids.length})…`);
+      const ck=ids[i]+days, hit=!!CACHE[ck];
+      const d=CACHE[ck]||(CACHE[ck]=await api(`/coins/${ids[i]}/market_chart?vs_currency=usd&days=${days}&interval=daily`));
+      for(const [t,v] of d.total_volumes){const k=Math.floor(t/864e5);tot.set(k,(tot.get(k)||0)+v);if(i===0)btc.set(k,v)}
+      if(i===0) for(const [t,p] of d.prices) price.set(Math.floor(t/864e5),p);
+      if(!hit) await sleep(750);
+    }
+    build(tot,btc,price);
+    setStatus(`Done: ${ids.length} coins, ${S.d.length} days.`);
+  }catch(e){setStatus('Error: '+e.message)}
+  $('go').disabled=false;
+}
+
+function build(tot,btc,price){
+  const keys=[...btc.keys()].sort((a,b)=>a-b).slice(0,-1); // drop partial current day
+  const d=[],p=[],r=[];
+  keys.forEach((k,i)=>{
+    if(i<6) return;
+    let a=0,b=0;
+    for(let j=i-6;j<=i;j++){a+=tot.get(keys[j])||0;b+=btc.get(keys[j])||0}
+    if(!b||!price.get(k)) return;
+    d.push(k*864e5);p.push(price.get(k));r.push(a/b);
+  });
+  const s=[...r].sort((a,b)=>a-b), q=f=>s[Math.floor(f*(s.length-1))];
+  S={d,p,r,med:q(.5),lo:q(.05),hi:q(.95)};
+  draw();
+}
+
+function color(r,a=1){
+  const {med,lo,hi}=S;
+  const t=r>=med?.5+.5*Math.min(1,(r-med)/(hi-med||1)):.5-.5*Math.min(1,(med-r)/(med-lo||1));
+  return `hsla(${120-120*t} 65% 45% / ${a})`;
+}
+
+function draw(){
+  if(!S) return;
+  const cv=$('c'), dpr=devicePixelRatio||1, W=cv.clientWidth, H=cv.clientHeight;
+  cv.width=W*dpr;cv.height=H*dpr;
+  const g=cv.getContext('2d');g.scale(dpr,dpr);
+  const css=getComputedStyle(document.documentElement);
+  const fg=css.getPropertyValue('--btc'),mut=css.getPropertyValue('--mut'),line=css.getPropertyValue('--line');
+  const L=56,R=14,n=S.d.length,pw=W-L-R,x=i=>L+pw*i/(n-1);
+  const t1=10,b1=H*.6,t2=H*.68,b2=H-30;
+  // price panel (log)
+  const lp=S.p.map(Math.log),pmin=Math.min(...lp),pmax=Math.max(...lp),pad=(pmax-pmin)*.05;
+  const yp=v=>b1-(Math.log(v)-(pmin-pad))/(pmax-pmin+2*pad)*(b1-t1);
+  const bw=pw/n+1;
+  for(let i=0;i<n;i++){g.fillStyle=color(S.r[i],.4);g.fillRect(x(i)-bw/2,t1,bw,b1-t1)}
+  g.font='12px system-ui';g.fillStyle=mut;g.textAlign='right';g.strokeStyle=line;g.lineWidth=1;
+  const lo=Math.exp(pmin),hi=Math.exp(pmax),st=Math.pow(10,Math.floor(Math.log10(hi/lo*.4)));
+  for(let v=Math.ceil(lo/st)*st;v<=hi;v+=st){const y=yp(v);g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText('$'+(v>=1000?v/1000+'k':v),L-6,y+4)}
+  g.beginPath();S.p.forEach((v,i)=>i?g.lineTo(x(i),yp(v)):g.moveTo(x(i),yp(v)));
+  g.strokeStyle=fg;g.lineWidth=2;g.stroke();
+  // ratio panel
+  const rmin=Math.min(...S.r)*.95,rmax=Math.max(...S.r)*1.05,yr=v=>b2-(v-rmin)/(rmax-rmin)*(b2-t2);
+  g.strokeStyle=line;g.lineWidth=1;g.fillStyle=mut;
+  const rs=rmax-rmin>4?1:.5;
+  for(let v=Math.ceil(rmin/rs)*rs;v<=rmax;v+=rs){const y=yr(v);g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText(v.toFixed(1)+'x',L-6,y+4)}
+  g.setLineDash([5,4]);g.strokeStyle=mut;g.beginPath();g.moveTo(L,yr(S.med));g.lineTo(W-R,yr(S.med));g.stroke();g.setLineDash([]);
+  g.textAlign='left';g.fillText('median '+S.med.toFixed(2)+'x',L+6,yr(S.med)-5);
+  g.lineWidth=2;
+  for(let i=1;i<n;i++){g.beginPath();g.moveTo(x(i-1),yr(S.r[i-1]));g.lineTo(x(i),yr(S.r[i]));g.strokeStyle=color(S.r[i]);g.stroke()}
+  // x axis
+  g.fillStyle=mut;g.textAlign='center';
+  const months=(S.d[n-1]-S.d[0])/2.63e9,step=Math.max(1,Math.ceil(months/9));let last=-1,c=0;
+  for(let i=0;i<n;i++){const dt=new Date(S.d[i]),m=dt.getUTCFullYear()*12+dt.getUTCMonth();
+    if(m!==last){last=m;if(c++%step===0)g.fillText(dt.toLocaleDateString('en',{month:'short',year:'2-digit',timeZone:'UTC'}),x(i),H-8)}}
+  S.geo={L,pw,n};
+}
+
+$('c').addEventListener('mousemove',e=>{
+  if(!S) return;
+  const {L,pw,n}=S.geo,i=Math.round((e.offsetX-L)/pw*(n-1));
+  if(i<0||i>=n) return;
+  $('read').textContent=`${new Date(S.d[i]).toISOString().slice(0,10)}  BTC $${Math.round(S.p[i]).toLocaleString()}  ·  Total/BTC (7D) ${S.r[i].toFixed(2)}x`;
+});
+try{
+  const sk=localStorage.getItem('cg_key');
+  if(sk){$('key').value=sk;$('rem').checked=true;$('plan').value=localStorage.getItem('cg_plan')||'demo'}
+}catch(e){}
+function saveKey(){
+  try{
+    if($('rem').checked){localStorage.setItem('cg_key',$('key').value.trim());localStorage.setItem('cg_plan',$('plan').value)}
+    else{localStorage.removeItem('cg_key');localStorage.removeItem('cg_plan')}
+  }catch(e){}
+}
+$('rem').addEventListener('change',saveKey);
+$('go').addEventListener('click',()=>{saveKey();run()});
+addEventListener('resize',draw);
+</script>
+</body>
+</html>
