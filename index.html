@@ -24,6 +24,7 @@ button:disabled{opacity:.5;cursor:wait}
 .legend{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mut);margin:0 0 6px auto;width:max-content}
 .legend i{display:block;width:180px;height:8px;border-radius:4px;background:linear-gradient(90deg,hsl(120 65% 45%),hsl(60 65% 45%),hsl(0 65% 45%))}
 canvas{width:100%;height:560px;display:block}
+#wrap{position:relative}#o{position:absolute;left:0;top:0}
 #read{font-size:13px;color:var(--mut);min-height:20px}
 </style>
 </head>
@@ -36,13 +37,14 @@ canvas{width:100%;height:560px;display:block}
   <label>Plan<select id="plan"><option value="demo">Demo (free, 365 days max)</option><option value="pro">Pro / Analyst</option></select></label>
   <label>Coins<select id="n"><option value="30">30</option><option value="100">100</option><option value="200">200</option><option value="500">500</option></select></label>
   <label>Range<select id="days"><option value="365">1 year</option><option value="730">2 years</option><option value="1460">4 years</option></select></label>
+  <label>Green threshold<select id="gs"><option value="1">Normal</option><option value="2" selected>Strict</option><option value="3">Stricter</option></select></label>
   <label class="chk"><input id="stab" type="checkbox" checked>Exclude stablecoins and wrapped assets</label>
-  <label class="chk"><input id="rem" type="checkbox">Save key on this device</label>
+  <label class="chk"><input id="rem" type="checkbox">Save on this device (insecure, not recommended)</label>
   <button id="go">Load data</button>
 </div>
 <div id="status">Enter your key and select Load data. Demo keys only allow 365 days.</div>
 <div class="legend"><span>Bitcoin-led</span><i></i><span>alt froth</span></div>
-<canvas id="c"></canvas>
+<div id="wrap"><canvas id="c"></canvas><canvas id="o"></canvas></div>
 <div id="read"></div>
 </main>
 <script>
@@ -86,9 +88,10 @@ async function run(){
       if(!hit) await sleep(750);
     }
     build(tot,btc,price);
-    setStatus(`Done: ${ids.length} coins, ${S.d.length} days.`);
+    setStatus(`Done: ${ids.length} coins, ${S.d.length} days. Use ← → (Shift = 7 days, Home/End) to move the crosshair.`);
   }catch(e){setStatus('Error: '+e.message)}
   $('go').disabled=false;
+  if(document.activeElement) document.activeElement.blur();
 }
 
 function build(tot,btc,price){
@@ -102,13 +105,21 @@ function build(tot,btc,price){
     d.push(k*864e5);p.push(price.get(k));r.push(a/b);
   });
   const s=[...r].sort((a,b)=>a-b), q=f=>s[Math.floor(f*(s.length-1))];
-  S={d,p,r,med:q(.5),lo:q(.05),hi:q(.95)};
+  S={d,p,r,med:q(.5),lo:q(0),hi:q(.95),hx:d.length-1,hy:null};
   draw();
+}
+
+function niceTicks(a,b,cnt){
+  const raw=(b-a)/cnt,mag=Math.pow(10,Math.floor(Math.log10(raw))),f=raw/mag;
+  const st=(f<1.5?1:f<3.5?2:f<7.5?5:10)*mag,out=[];
+  for(let v=Math.ceil(a/st)*st;v<=b+1e-9;v+=st) out.push(+v.toFixed(10));
+  return out;
 }
 
 function color(r,a=1){
   const {med,lo,hi}=S;
-  const t=r>=med?.5+.5*Math.min(1,(r-med)/(hi-med||1)):.5-.5*Math.min(1,(med-r)/(med-lo||1));
+  const gm=+$('gs').value;
+  const t=r>=med?.5+.5*Math.pow(Math.min(1,(r-med)/(hi-med||1)),.8):.5-.5*Math.pow(Math.min(1,(med-r)/(med-lo||1)),gm);
   return `hsla(${120-120*t} 65% 45% / ${a})`;
 }
 
@@ -127,15 +138,13 @@ function draw(){
   const bw=pw/n+1;
   for(let i=0;i<n;i++){g.fillStyle=color(S.r[i],.4);g.fillRect(x(i)-bw/2,t1,bw,b1-t1)}
   g.font='12px system-ui';g.fillStyle=mut;g.textAlign='right';g.strokeStyle=line;g.lineWidth=1;
-  const lo=Math.exp(pmin),hi=Math.exp(pmax),st=Math.pow(10,Math.floor(Math.log10(hi/lo*.4)));
-  for(let v=Math.ceil(lo/st)*st;v<=hi;v+=st){const y=yp(v);g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText('$'+(v>=1000?v/1000+'k':v),L-6,y+4)}
+  for(const v of niceTicks(Math.exp(pmin),Math.exp(pmax),5)){const y=yp(v);g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText('$'+(v>=1000?+(v/1000).toFixed(1)+'k':v),L-6,y+4)}
   g.beginPath();S.p.forEach((v,i)=>i?g.lineTo(x(i),yp(v)):g.moveTo(x(i),yp(v)));
   g.strokeStyle=fg;g.lineWidth=2;g.stroke();
   // ratio panel
   const rmin=Math.min(...S.r)*.95,rmax=Math.max(...S.r)*1.05,yr=v=>b2-(v-rmin)/(rmax-rmin)*(b2-t2);
   g.strokeStyle=line;g.lineWidth=1;g.fillStyle=mut;
-  const rs=rmax-rmin>4?1:.5;
-  for(let v=Math.ceil(rmin/rs)*rs;v<=rmax;v+=rs){const y=yr(v);g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText(v.toFixed(1)+'x',L-6,y+4)}
+  for(const v of niceTicks(rmin,rmax,4)){const y=yr(v);g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText(v.toFixed(1)+'x',L-6,y+4)}
   g.setLineDash([5,4]);g.strokeStyle=mut;g.beginPath();g.moveTo(L,yr(S.med));g.lineTo(W-R,yr(S.med));g.stroke();g.setLineDash([]);
   g.textAlign='left';g.fillText('median '+S.med.toFixed(2)+'x',L+6,yr(S.med)-5);
   g.lineWidth=2;
@@ -145,13 +154,41 @@ function draw(){
   const months=(S.d[n-1]-S.d[0])/2.63e9,step=Math.max(1,Math.ceil(months/9));let last=-1,c=0;
   for(let i=0;i<n;i++){const dt=new Date(S.d[i]),m=dt.getUTCFullYear()*12+dt.getUTCMonth();
     if(m!==last){last=m;if(c++%step===0)g.fillText(dt.toLocaleDateString('en',{month:'short',year:'2-digit',timeZone:'UTC'}),x(i),H-8)}}
-  S.geo={L,pw,n};
+  S.geo={L,pw,n,t1,b1,t2,b2,pmin,pad,pmax,rmin,rmax,x,yp,yr,W,H,R,dpr};
+  const ov=$('o');ov.width=W*dpr;ov.height=H*dpr;
+  cross();
+}
+function cross(){
+  if(!S) return;
+  const {L,pw,n,t1,b1,t2,b2,pmin,pad,pmax,rmin,rmax,x,yp,yr,W,H,R,dpr}=S.geo;
+  const g=$('o').getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+  const css=getComputedStyle(document.documentElement),fg=css.getPropertyValue('--btc'),mut=css.getPropertyValue('--mut');
+  if(S.hx!=null){
+    const i=S.hx,cx=x(i),bg=css.getPropertyValue('--bg').trim();
+    const y=S.hy==null?null:Math.min(Math.max(S.hy,t1),b2);
+    const inTop=y!=null&&y<=b1, inBot=y!=null&&y>=t2;
+    g.save();g.setLineDash([4,4]);g.lineWidth=1;g.strokeStyle=mut;
+    g.beginPath();g.moveTo(cx,t1);g.lineTo(cx,b2);g.stroke();
+    if(inTop||inBot){g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke()}
+    g.restore();
+    for(const yy of [yp(S.p[i]),yr(S.r[i])]){g.beginPath();g.arc(cx,yy,4,0,7);g.fillStyle=fg;g.fill();g.strokeStyle=bg;g.lineWidth=2;g.stroke()}
+    const pill=(txt,cxp,cyp,right)=>{
+      g.font='12px system-ui';const w=g.measureText(txt).width+12;
+      let rx=right?cxp-w:cxp-w/2;rx=Math.max(0,Math.min(W-w,rx));
+      g.fillStyle=fg;g.fillRect(rx,cyp-10,w,20);
+      g.fillStyle=bg;g.textAlign='center';g.fillText(txt,rx+w/2,cyp+4);
+    };
+    if(inTop){const v=Math.exp(pmin-pad+(b1-y)/(b1-t1)*(pmax-pmin+2*pad));pill('$'+(v>=1000?(v/1000).toFixed(1)+'k':v.toFixed(0)),L-2,y,true)}
+    if(inBot){pill((rmin+(b2-y)/(b2-t2)*(rmax-rmin)).toFixed(2)+'x',L-2,y,true)}
+    pill(new Date(S.d[i]).toISOString().slice(0,10),cx,H-14,false);
+  }
 }
 
-$('c').addEventListener('mousemove',e=>{
+$('o').addEventListener('mousemove',e=>{
   if(!S) return;
   const {L,pw,n}=S.geo,i=Math.round((e.offsetX-L)/pw*(n-1));
   if(i<0||i>=n) return;
+  S.hx=i;S.hy=e.offsetY;cross();
   $('read').textContent=`${new Date(S.d[i]).toISOString().slice(0,10)}  BTC $${Math.round(S.p[i]).toLocaleString()}  ·  Total/BTC (7D) ${S.r[i].toFixed(2)}x`;
 });
 try{
@@ -165,6 +202,17 @@ function saveKey(){
   }catch(e){}
 }
 $('rem').addEventListener('change',saveKey);
+$('gs').addEventListener('change',()=>draw());
+$('o').addEventListener('mouseleave',()=>{if(!S)return;S.hx=S.d.length-1;S.hy=null;cross();$('read').textContent=''});
+addEventListener('keydown',e=>{
+  if(!S||/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  const n=S.d.length,st=e.shiftKey?7:1;let i=S.hx==null?n-1:S.hx;
+  if(e.key==='ArrowLeft')i-=st;else if(e.key==='ArrowRight')i+=st;else if(e.key==='Home')i=0;else if(e.key==='End')i=n-1;else return;
+  e.preventDefault();
+  i=Math.max(0,Math.min(n-1,i));
+  S.hx=i;S.hy=S.geo.yp(S.p[i]);cross();
+  $('read').textContent=`${new Date(S.d[i]).toISOString().slice(0,10)}  BTC $${Math.round(S.p[i]).toLocaleString()}  ·  Total/BTC (7D) ${S.r[i].toFixed(2)}x`;
+});
 $('go').addEventListener('click',()=>{saveKey();run()});
 addEventListener('resize',draw);
 </script>
